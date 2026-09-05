@@ -1,0 +1,28 @@
+---
+description: URL shortener project conventions and phase awareness
+alwaysApply: true
+---
+
+# URL Shortener — Project Rules
+
+## Phase awareness
+- Check `AGENTS.md` for current implementation phase.
+- Only implement features scoped to the active phase agent prompt.
+- Do not add Redis/Kafka/auth until their phase.
+
+## Code style
+- TypeScript strict mode; prefer explicit types on public APIs.
+- Use Fastify route plugins; keep handlers thin, logic in services.
+- All DB access through `src/db/`; no raw SQL in routes.
+
+## API contracts
+- Follow `docs/api.md` for request/response shapes and status codes.
+- Return JSON errors: `{ "error": "message", "code": "ERROR_CODE" }`.
+
+## Testing
+- Add unit tests for utils and services.
+- Run `make test` before completing a phase.
+
+## Security
+- Never commit `.env`; use `.env.example`.
+- Hash IPs before storing; validate URLs (http/https only).
