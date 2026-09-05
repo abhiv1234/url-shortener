@@ -7,13 +7,13 @@ down:
 	docker compose down
 
 migrate:
-	@echo "Run migrations after Phase 1 implementation"
+	npm run migrate
 
 run:
-	@echo "Run server after Phase 1 implementation"
+	npm run dev
 
 test:
-	@echo "Run tests after Phase 1 implementation"
+	npm test
 
 worker:
 	@echo "Run click worker after Phase 3 implementation"

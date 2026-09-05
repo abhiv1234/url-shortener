@@ -61,15 +61,36 @@ See [AGENTS.md](AGENTS.md) for orchestration instructions and [docs/](docs/) for
 ## Quick Start
 
 ```bash
-# Phase 1 (once implemented)
-docker compose up -d
+cp .env.example .env
+npm install
+make up
 make migrate
 make run
 ```
 
-## Tech Stack (planned)
+Create a short URL:
 
-- **API:** Node.js (Fastify) or Go
+```bash
+curl -s -X POST http://localhost:3000/v1/urls \
+  -H 'Content-Type: application/json' \
+  -d '{"longUrl":"https://example.com/very/long/path"}'
+```
+
+Follow the redirect:
+
+```bash
+curl -I http://localhost:3000/<shortCode>
+```
+
+Run tests:
+
+```bash
+make test
+```
+
+## Tech Stack
+
+- **API:** Node.js + Fastify + TypeScript
 - **Database:** PostgreSQL
 - **Cache:** Redis
 - **Queue:** Kafka (analytics)
