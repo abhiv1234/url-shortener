@@ -1,4 +1,7 @@
 import Fastify from 'fastify';
+import { connectRedis } from './cache/redis.js';
+import { Singleflight } from './cache/singleflight.js';
+import { UrlCache } from './cache/urlCache.js';
 import { config } from './config.js';
 import { redirectRoutes } from './routes/redirect.js';
 import { urlRoutes } from './routes/urls.js';
@@ -9,7 +12,10 @@ export async function buildApp() {
     logger: config.nodeEnv !== 'test',
   });
 
-  const urlService = new UrlService(undefined, config.shortUrlBase);
+  const redis = await connectRedis();
+  const cache = new UrlCache(redis);
+  const singleflight = new Singleflight(redis);
+  const urlService = new UrlService(undefined, config.shortUrlBase, cache, singleflight);
 
   app.get('/health', async () => ({ status: 'ok' }));
 

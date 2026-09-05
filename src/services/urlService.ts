@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { incrementStaleCacheServed } from '../cache/metrics.js';
+import { Singleflight } from '../cache/singleflight.js';
+import type { CachedUrlEntry } from '../cache/urlCache.js';
+import { UrlCache } from '../cache/urlCache.js';
 import { pool } from '../db/pool.js';
 import { encodeBase62 } from '../utils/base62.js';
 import { isValidCustomAlias, isValidLongUrl } from '../utils/validate.js';
@@ -120,10 +124,19 @@ async function insertWithGeneratedCode(
   return mapRow(updateResult.rows[0], '');
 }
 
+function toCacheEntry(record: UrlRecord): CachedUrlEntry {
+  return {
+    longUrl: record.longUrl,
+    expiresAt: record.expiresAt,
+  };
+}
+
 export class UrlService {
   constructor(
     private readonly db: Pool = pool,
     private readonly shortUrlBase: string,
+    private readonly cache?: UrlCache,
+    private readonly singleflight?: Singleflight,
   ) {}
 
   async createUrl(input: CreateUrlInput): Promise<UrlRecord> {
@@ -157,6 +170,7 @@ export class UrlService {
         );
 
         const record = mapRow(result.rows[0], this.shortUrlBase);
+        await this.warmCache(record);
         return record;
       } catch (error: unknown) {
         if (isUniqueViolation(error)) {
@@ -173,6 +187,7 @@ export class UrlService {
       const record = await insertWithGeneratedCode(client, longUrl, expiresAt);
       await client.query('COMMIT');
       record.shortUrl = buildShortUrl(this.shortUrlBase, record.shortCode);
+      await this.warmCache(record);
       return record;
     } catch (error) {
       await client.query('ROLLBACK');
@@ -183,8 +198,65 @@ export class UrlService {
   }
 
   async getLongUrlByCode(shortCode: string): Promise<string> {
-    const result = await this.db.query<{ long_url: string }>(
-      'SELECT long_url FROM urls WHERE short_code = $1',
+    if (!this.cache || !this.singleflight) {
+      const entry = await this.fetchUrlFromDb(shortCode);
+      return entry.longUrl;
+    }
+
+    const cached = await this.cache.get(shortCode);
+    if (cached) {
+      return cached.longUrl;
+    }
+
+    return this.singleflight.run(
+      shortCode,
+      async () => {
+        const recheck = await this.cache!.get(shortCode);
+        if (recheck) {
+          return recheck.longUrl;
+        }
+
+        return this.loadAndCache(shortCode);
+      },
+      async () => {
+        const populated = await this.cache!.get(shortCode);
+        return populated?.longUrl ?? null;
+      },
+      async () => this.loadAndCache(shortCode),
+    );
+  }
+
+  private async warmCache(record: UrlRecord): Promise<void> {
+    if (!this.cache) {
+      return;
+    }
+
+    await this.cache.set(record.shortCode, toCacheEntry(record));
+  }
+
+  private async loadAndCache(shortCode: string): Promise<string> {
+    try {
+      const entry = await this.fetchUrlFromDb(shortCode);
+      await this.cache!.set(shortCode, entry);
+      return entry.longUrl;
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        throw error;
+      }
+
+      const stale = await this.cache!.get(shortCode);
+      if (stale) {
+        incrementStaleCacheServed();
+        return stale.longUrl;
+      }
+
+      throw error;
+    }
+  }
+
+  private async fetchUrlFromDb(shortCode: string): Promise<CachedUrlEntry> {
+    const result = await this.db.query<{ long_url: string; expires_at: Date | null }>(
+      'SELECT long_url, expires_at FROM urls WHERE short_code = $1',
       [shortCode],
     );
 
@@ -192,7 +264,11 @@ export class UrlService {
       throw new NotFoundError('short code not found', 'NOT_FOUND');
     }
 
-    return result.rows[0].long_url;
+    const row = result.rows[0];
+    return {
+      longUrl: row.long_url,
+      expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
+    };
   }
 }
 

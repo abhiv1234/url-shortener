@@ -63,7 +63,7 @@ See [AGENTS.md](AGENTS.md) for orchestration instructions and [docs/](docs/) for
 ```bash
 cp .env.example .env
 npm install
-make up
+make up      # starts Postgres + Redis
 make migrate
 make run
 ```
