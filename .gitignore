@@ -1,3 +1,6 @@
+# Local tooling
+.bin/
+
 # Dependencies
 node_modules/
 vendor/
