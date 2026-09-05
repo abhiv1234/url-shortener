@@ -7,3 +7,8 @@ services:
       POSTGRES_USER: urlshort
       POSTGRES_PASSWORD: urlshort
       POSTGRES_DB: urlshort
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

@@ -5,6 +5,7 @@ export interface AppConfig {
   nodeEnv: string;
   shortUrlBase: string;
   databaseUrl: string;
+  redisUrl: string;
 }
 
 function requireEnv(name: string, fallback?: string): string {
@@ -23,4 +24,5 @@ export const config: AppConfig = {
     'DATABASE_URL',
     'postgres://urlshort:urlshort@localhost:5432/urlshort',
   ),
+  redisUrl: requireEnv('REDIS_URL', 'redis://localhost:6379'),
 };
