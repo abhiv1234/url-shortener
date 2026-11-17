@@ -47,15 +47,33 @@ describe('UrlCache', () => {
 
     const cache = new UrlCache(redis);
     await cache.set('abc', {
+      id: '42',
       longUrl: 'https://example.com',
       expiresAt: null,
     });
 
     const entry = await cache.get('abc');
     expect(entry).toEqual({
+      id: '42',
       longUrl: 'https://example.com',
       expiresAt: null,
     });
     expect(store.get('url:abc')?.ttl).toBe(DEFAULT_CACHE_TTL_SECONDS);
+  });
+
+  it('treats legacy entries without an id as a miss', async () => {
+    const redis = {
+      async get() {
+        return JSON.stringify({ longUrl: 'https://example.com', expiresAt: null });
+      },
+      async set() {
+        return 'OK';
+      },
+      async del() {
+        return 1;
+      },
+    };
+
+    expect(await new UrlCache(redis).get('abc')).toBeNull();
   });
 });

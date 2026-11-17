@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { resetMetrics, getStaleCacheServedCount } from '../src/cache/metrics.js';
 import { Singleflight } from '../src/cache/singleflight.js';
 import { UrlCache } from '../src/cache/urlCache.js';
-import { NotFoundError, UrlService } from '../src/services/urlService.js';
+import { ConflictError, NotFoundError, UrlService } from '../src/services/urlService.js';
 
 function createMockRedis() {
   const store = new Map<string, string>();
-  const locks = new Set<string>();
+  const locks = new Map<string, string>();
 
   return {
     store,
@@ -19,7 +19,7 @@ function createMockRedis() {
           if (locks.has(key)) {
             return null;
           }
-          locks.add(key);
+          locks.set(key, value);
           return 'OK';
         }
 
@@ -27,9 +27,15 @@ function createMockRedis() {
         return 'OK';
       },
       async del(key: string) {
-        locks.delete(key);
         store.delete(key);
         return 1;
+      },
+      async eval(_script: string, _numKeys: number, key: string, token: string) {
+        if (locks.get(key) === token) {
+          locks.delete(key);
+          return 1;
+        }
+        return 0;
       },
     },
   };
@@ -47,7 +53,7 @@ describe('UrlService cache integration', () => {
         query: async () => {
           dbQueries += 1;
           return {
-            rows: [{ long_url: 'https://example.com', expires_at: null }],
+            rows: [{ id: '1', long_url: 'https://example.com', expires_at: null }],
           };
         },
         connect: async () => {
@@ -79,7 +85,7 @@ describe('UrlService cache integration', () => {
           dbQueries += 1;
           await new Promise((resolve) => setTimeout(resolve, 50));
           return {
-            rows: [{ long_url: 'https://example.com/hot', expires_at: null }],
+            rows: [{ id: '2', long_url: 'https://example.com/hot', expires_at: null }],
           };
         },
         connect: async () => {
@@ -148,16 +154,16 @@ describe('UrlService cache integration', () => {
 
     let cacheReads = 0;
     const cacheWithMissThenHit = {
-      async get(shortCode: string) {
+      async get(_shortCode: string) {
         cacheReads += 1;
         if (cacheReads <= 2) {
           return null;
         }
-        return { longUrl: 'https://cached.example.com', expiresAt: null };
+        return { id: '4', longUrl: 'https://cached.example.com', expiresAt: null };
       },
       async set() {},
       async delete() {},
-    } as UrlCache;
+    } as unknown as UrlCache;
 
     const service = new UrlService(
       {
@@ -196,5 +202,118 @@ describe('UrlService cache integration', () => {
     );
 
     await expect(service.getLongUrlByCode('missing')).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('falls back to Postgres when Redis is unavailable on redirect', async () => {
+    const failing = async (): Promise<never> => {
+      throw new Error('redis down');
+    };
+    const brokenRedis = { get: failing, set: failing, del: failing, eval: failing };
+    const warnings: unknown[] = [];
+
+    const service = new UrlService(
+      {
+        query: async () => ({
+          rows: [{ id: '3', long_url: 'https://example.com/db', expires_at: null }],
+        }),
+        connect: async () => {
+          throw new Error('not implemented');
+        },
+      } as never,
+      'http://localhost:3000',
+      new UrlCache(brokenRedis),
+      new Singleflight(brokenRedis),
+      { warn: (obj) => warnings.push(obj) },
+    );
+
+    await expect(service.getLongUrlByCode('abc')).resolves.toBe('https://example.com/db');
+    expect(warnings.length).toBeGreaterThan(0);
+  });
+
+  it('still returns the created URL when cache warming fails', async () => {
+    const failing = async (): Promise<never> => {
+      throw new Error('redis down');
+    };
+    const brokenRedis = { get: failing, set: failing, del: failing, eval: failing };
+    const queries: string[] = [];
+
+    const client = {
+      async query(sql: string) {
+        queries.push(sql.trim().split(/\s+/)[0]);
+        if (sql.includes('INSERT')) {
+          return { rows: [{ id: '125', short_code: '_tmp', long_url: 'https://example.com', expires_at: null }] };
+        }
+        if (sql.includes('UPDATE')) {
+          return { rows: [{ id: '125', short_code: '21', long_url: 'https://example.com', expires_at: null }] };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+
+    const service = new UrlService(
+      { query: async () => ({ rows: [] }), connect: async () => client } as never,
+      'http://localhost:3000',
+      new UrlCache(brokenRedis),
+      new Singleflight(brokenRedis),
+      { warn: () => undefined },
+    );
+
+    const record = await service.createUrl({ longUrl: 'https://example.com' });
+    expect(record.shortUrl).toBe('http://localhost:3000/21');
+    expect(queries).toEqual(['BEGIN', 'INSERT', 'UPDATE', 'COMMIT']);
+  });
+
+  it('retries when a generated code collides with an existing custom alias', async () => {
+    let nextId = 100;
+    let updates = 0;
+    const client = {
+      async query(sql: string) {
+        if (sql.includes('INSERT')) {
+          nextId += 1;
+          return { rows: [{ id: String(nextId), short_code: '_tmp', long_url: 'https://example.com', expires_at: null }] };
+        }
+        if (sql.includes('UPDATE')) {
+          updates += 1;
+          if (updates === 1) {
+            const error = new Error('duplicate key');
+            (error as { code?: string }).code = '23505';
+            throw error;
+          }
+          return { rows: [{ id: String(nextId), short_code: '1e', long_url: 'https://example.com', expires_at: null }] };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+
+    const service = new UrlService(
+      { query: async () => ({ rows: [] }), connect: async () => client } as never,
+      'http://localhost:3000',
+    );
+
+    const record = await service.createUrl({ longUrl: 'https://example.com' });
+    expect(record.shortCode).toBe('1e');
+    expect(updates).toBe(2);
+  });
+
+  it('keeps mapping custom alias collisions to ConflictError', async () => {
+    const service = new UrlService(
+      {
+        query: async () => {
+          const error = new Error('duplicate key');
+          (error as { code?: string }).code = '23505';
+          throw error;
+        },
+        connect: async () => {
+          throw new Error('not implemented');
+        },
+      } as never,
+      'http://localhost:3000',
+    );
+
+    await expect(
+      service.createUrl({ longUrl: 'https://example.com', customAlias: 'taken' }),
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 });

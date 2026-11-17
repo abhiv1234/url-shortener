@@ -24,6 +24,23 @@ describe('UrlService validation', () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
+  it('rejects a missing request body', async () => {
+    await expect(service.createUrl(undefined)).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.createUrl(null)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('rejects non-string longUrl and customAlias values', async () => {
+    await expect(
+      service.createUrl({ longUrl: 123 } as unknown as { longUrl: string }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      service.createUrl({
+        longUrl: 'https://example.com',
+        customAlias: 12345,
+      } as unknown as { longUrl: string; customAlias: string }),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
   it('rejects non-positive ttl values', async () => {
     await expect(
       service.createUrl({ longUrl: 'https://example.com', ttl: 0 }),

@@ -1,8 +1,8 @@
-import type { Redis } from 'ioredis';
 
 export const DEFAULT_CACHE_TTL_SECONDS = 86_400;
 
 export interface CachedUrlEntry {
+  id: string;
   longUrl: string;
   expiresAt: string | null;
 }
@@ -29,8 +29,15 @@ export function computeCacheTtl(expiresAt: string | null, now = Date.now()): num
   return Math.min(DEFAULT_CACHE_TTL_SECONDS, remainingSeconds);
 }
 
+/** The slice of an ioredis client the cache needs (keeps it easy to fake in tests). */
+export interface UrlCacheRedis {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, mode: 'EX', seconds: number): Promise<unknown>;
+  del(key: string): Promise<unknown>;
+}
+
 export class UrlCache {
-  constructor(private readonly redis: Pick<Redis, 'get' | 'set' | 'del'>) {}
+  constructor(private readonly redis: UrlCacheRedis) {}
 
   async get(shortCode: string): Promise<CachedUrlEntry | null> {
     const raw = await this.redis.get(cacheKey(shortCode));
@@ -39,11 +46,16 @@ export class UrlCache {
     }
 
     try {
-      const parsed = JSON.parse(raw) as CachedUrlEntry;
-      if (typeof parsed.longUrl !== 'string') {
+      const parsed = JSON.parse(raw) as Partial<CachedUrlEntry>;
+      // Entries written by an older version (no id) are treated as misses and rewritten.
+      if (typeof parsed.longUrl !== 'string' || typeof parsed.id !== 'string') {
         return null;
       }
-      return parsed;
+      return {
+        id: parsed.id,
+        longUrl: parsed.longUrl,
+        expiresAt: typeof parsed.expiresAt === 'string' ? parsed.expiresAt : null,
+      };
     } catch {
       return null;
     }
