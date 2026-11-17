@@ -1,0 +1,67 @@
+# Alert rules referenced by docs/runbook.md. Thresholds assume the README's SLOs.
+groups:
+  - name: url-shortener
+    rules:
+      - alert: RedirectLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(redirect_duration_seconds_bucket{outcome="redirect"}[5m]))) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: Redirect p99 above 50ms SLO
+          runbook: docs/runbook.md#redirect-latency-high
+
+      - alert: High5xxRate
+        expr: sum(rate(http_requests_total{status_class="5xx"}[5m])) / sum(rate(http_requests_total[5m])) > 0.01
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: More than 1% of requests are failing with 5xx
+          runbook: docs/runbook.md#elevated-5xx
+
+      - alert: CacheHitRatioLow
+        expr: sum(rate(cache_requests_total{result="hit"}[10m])) / sum(rate(cache_requests_total[10m])) < 0.8
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: Redirect cache hit ratio below 80%
+          runbook: docs/runbook.md#cache-hit-ratio-low
+
+      - alert: RedisErrors
+        expr: sum(rate(cache_requests_total{result="error"}[5m])) > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: Redis is failing; redirects are falling back to Postgres
+          runbook: docs/runbook.md#redis-down
+
+      - alert: ServingStaleCache
+        expr: sum(rate(stale_cache_served_total[5m])) > 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: Postgres reads are failing; redirects are being served from cache only
+          runbook: docs/runbook.md#postgres-down
+
+      - alert: ClickEventsDropped
+        expr: sum(rate(click_events_dropped_total[5m])) > 0
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: Click events are being dropped before reaching Kafka
+          runbook: docs/runbook.md#kafka-down-or-clicks-dropped
+
+      - alert: KafkaConsumerLagHigh
+        expr: sum(kafka_consumer_lag{topic="click-events"}) > 100000
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: Click worker is falling behind
+          runbook: docs/runbook.md#kafka-consumer-lag
+
+      - alert: InstanceDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: '{{ $labels.job }} target is down'
+          runbook: docs/runbook.md#instance-down

@@ -1,14 +1,106 @@
+name: url-shortener
+
+# `docker compose up -d`                 → Postgres, Redis, Redpanda (for `npm run dev`)
+# `docker compose --profile app up -d`   → full stack: + migrate, api, worker, cleaner, Prometheus
+# Host ports are overridable when something else already uses them, e.g. POSTGRES_PORT=5433.
+
+x-app: &app
+  build: .
+  image: url-shortener:local
+  restart: unless-stopped
+  profiles: [app]
+  environment:
+    NODE_ENV: production
+    DATABASE_URL: postgres://urlshort:urlshort@postgres:5432/urlshort
+    REDIS_URL: redis://redis:6379
+    KAFKA_BROKERS: redpanda:9092
+    SHORT_URL_BASE: ${SHORT_URL_BASE:-http://localhost:3000}
+    # Dev-only defaults. Set real values (32+ random chars) in .env for anything shared.
+    JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-not-for-production}
+    IP_HASH_SALT: ${IP_HASH_SALT:-local-dev-ip-salt-not-for-production-xx}
+    RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    redpanda: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
+
 services:
   postgres:
     image: postgres:16-alpine
-    ports:
-      - "5432:5432"
+    ports: ['${POSTGRES_PORT:-5432}:5432']
     environment:
       POSTGRES_USER: urlshort
       POSTGRES_PASSWORD: urlshort
       POSTGRES_DB: urlshort
+    volumes: ['pgdata:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U urlshort -d urlshort']
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    ports: ['${REDIS_PORT:-6379}:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Kafka-compatible broker; much lighter than Kafka + ZooKeeper for local dev.
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:${KAFKA_PORT:-9092}
+    # Host clients use localhost:${KAFKA_PORT:-9092} (the external listener).
+    ports: ['${KAFKA_PORT:-9092}:19092']
+    healthcheck:
+      test: ['CMD-SHELL', "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  migrate:
+    <<: *app
+    restart: 'no'
+    command: ['node', 'dist/db/migrate.js']
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    <<: *app
+    ports: ['${API_PORT:-3000}:3000']
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/ready >/dev/null || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    <<: *app
+    command: ['node', 'dist/workers/clickConsumer.js']
+    ports: ['${WORKER_METRICS_PORT:-9101}:9101']
+
+  cleaner:
+    <<: *app
+    command: ['node', 'dist/workers/expiredUrlCleaner.js']
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: [app]
+    ports: ['${PROMETHEUS_PORT:-9090}:9090']
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on: [api, worker]
+
+volumes:
+  pgdata:

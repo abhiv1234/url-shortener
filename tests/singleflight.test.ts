@@ -7,7 +7,7 @@ describe('Singleflight', () => {
       async set() {
         return 'OK';
       },
-      async del() {
+      async eval() {
         return 1;
       },
     };
@@ -29,7 +29,7 @@ describe('Singleflight', () => {
       async set() {
         return null;
       },
-      async del() {
+      async eval() {
         return 1;
       },
     };
@@ -54,12 +54,74 @@ describe('Singleflight', () => {
       async set() {
         return null;
       },
-      async del() {
+      async eval() {
         return 1;
       },
     };
 
     const singleflight = new Singleflight(redis, 10, 30);
+    const result = await singleflight.run(
+      'abc',
+      async () => 'leader',
+      async () => null,
+      async () => 'timeout',
+    );
+
+    expect(result).toBe('timeout');
+  });
+
+  it('releases only its own lock token', async () => {
+    let storedToken: string | undefined;
+    const evalCalls: string[][] = [];
+    const redis = {
+      async set(_key: string, value: string) {
+        storedToken = value;
+        return 'OK';
+      },
+      async eval(_script: string, _numKeys: number, ...args: string[]) {
+        evalCalls.push(args);
+        return 1;
+      },
+    };
+
+    const singleflight = new Singleflight(redis);
+    await singleflight.run('abc', async () => 'leader', async () => null, async () => 'timeout');
+
+    expect(evalCalls).toEqual([['sf:abc', storedToken]]);
+  });
+
+  it('does not let a failed lock release mask the leader result', async () => {
+    const redis = {
+      async set() {
+        return 'OK';
+      },
+      async eval(): Promise<unknown> {
+        throw new Error('redis down');
+      },
+    };
+
+    const singleflight = new Singleflight(redis);
+    const result = await singleflight.run(
+      'abc',
+      async () => 'leader',
+      async () => null,
+      async () => 'timeout',
+    );
+
+    expect(result).toBe('leader');
+  });
+
+  it('falls straight through to the source when the lock cannot be acquired', async () => {
+    const redis = {
+      async set(): Promise<string | null> {
+        throw new Error('redis down');
+      },
+      async eval() {
+        return 1;
+      },
+    };
+
+    const singleflight = new Singleflight(redis);
     const result = await singleflight.run(
       'abc',
       async () => 'leader',

@@ -1,9 +1,11 @@
-/** Metric stubs — wired to real instrumentation in Phase 5. */
+import { staleCacheServedTotal } from '../observability/metrics.js';
 
+/** Thin wrapper kept for the cache layer; backed by the Prometheus counter. */
 let staleCacheServedCount = 0;
 
 export function incrementStaleCacheServed(): void {
   staleCacheServedCount += 1;
+  staleCacheServedTotal.inc();
 }
 
 export function getStaleCacheServedCount(): number {
